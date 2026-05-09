@@ -1,4 +1,6 @@
 import { useState } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
 const NAVY = "#1B2E4B";
 const BLUE = "#3A90D9";
@@ -77,6 +79,8 @@ type AnalisisIA = {
   semaforo?: string;
   comparacion_opciones?: string;
 };
+
+type jsPDFWithAutoTable = jsPDF & { lastAutoTable: { finalY: number } };
 
 const LETRAS = ["A", "B", "C"];
 
@@ -254,6 +258,221 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
     const id = Date.now();
     setActivos(prev => [...prev, { ...nuevoActivo, id }]);
     setNuevoActivo({ nombre: "", valorAdq: "", valorResidual: "", vidaUtil: "", fechaCompra: "" });
+  };
+
+  const generarPDF = () => {
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" }) as jsPDFWithAutoTable;
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const today = new Date();
+
+    const fechaEmision = today.toLocaleDateString("es-CO", { day: "2-digit", month: "2-digit", year: "numeric" });
+    const fechaVigencia = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000)
+      .toLocaleDateString("es-CO", { day: "2-digit", month: "2-digit", year: "numeric" });
+
+    // PDF number formatter (always shows value)
+    const f = (n: number) =>
+      new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(n);
+    const r = (n: number) => (isNaN(n) || !isFinite(n) ? "—" : n.toFixed(1) + "%");
+
+    // ── HEADER ──
+    const hdrH = 44;
+    doc.setFillColor(27, 46, 75);
+    doc.rect(0, 0, pageW, hdrH, "F");
+
+    // Decorative circles (upper right)
+    doc.setFillColor(36, 62, 98);
+    doc.circle(pageW - 5, -5, 22, "F");
+    doc.setFillColor(31, 53, 87);
+    doc.circle(pageW - 28, 14, 14, "F");
+
+    // Orange accent line
+    doc.setFillColor(244, 124, 32);
+    doc.rect(0, hdrH - 2, pageW, 3, "F");
+
+    // Logo text
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(28);
+    doc.setTextColor(255, 255, 255);
+    doc.text("ConVive Pro", 12, 20);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(13);
+    doc.setTextColor(58, 144, 217);
+    doc.text("Cotizacion de Servicios", 12, 29);
+
+    // Emission and validity dates
+    doc.setFontSize(8);
+    doc.setTextColor(168, 196, 224);
+    doc.text(`Emision: ${fechaEmision}   Vigencia: ${fechaVigencia} (30 dias)`, 12, 38);
+
+    let y = hdrH + 11;
+
+    // ── DATOS DEL CLIENTE ──
+    doc.setFillColor(244, 124, 32);
+    doc.rect(10, y, 3, 9, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(27, 46, 75);
+    doc.text("Datos del cliente", 16, y + 6.5);
+    y += 12;
+
+    autoTable(doc, {
+      startY: y,
+      margin: { left: 10, right: 10 },
+      body: [
+        ["Conjunto / Empresa", cliente.nombre || "—"],
+        ["Contacto", cliente.contacto || "—"],
+        ["Telefono", cliente.telefono || "—"],
+        ["Correo", cliente.correo || "—"],
+        ["Ciudad", cliente.ciudad || "—"],
+        ["Direccion", cliente.direccion || "—"],
+      ],
+      theme: "plain",
+      styles: { fontSize: 9, cellPadding: { top: 2.5, bottom: 2.5, left: 3, right: 3 } },
+      columnStyles: {
+        0: { fontStyle: "bold", cellWidth: 44, textColor: [27, 46, 75] as [number, number, number] },
+        1: { textColor: [107, 122, 148] as [number, number, number] },
+      },
+      alternateRowStyles: { fillColor: [244, 247, 251] as [number, number, number] },
+    });
+
+    y = doc.lastAutoTable.finalY + 12;
+
+    // ── OPTIONS ──
+    for (const op of opciones) {
+      const fin = calcFinanciero(op);
+
+      if (y > pageH - 80) {
+        doc.addPage();
+        y = 18;
+      }
+
+      // Option title bar
+      doc.setFillColor(58, 144, 217);
+      doc.rect(10, y, pageW - 20, 11, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(11);
+      doc.setTextColor(255, 255, 255);
+      doc.text(`Opcion ${op.id}`, 14, y + 7.5);
+      y += 13;
+
+      // Services table
+      const rows = op.servicios.map(s => {
+        const cat = SERVICIOS_CATALOGO.find(c => c.id === s.servicioId);
+        const cu = getCosto(s);
+        const pu = parseFloat(s.precioCliente) || 0;
+        const pt = pu * s.cantidad;
+        const ct = cu * s.cantidad;
+        const ri = pt > 0 ? ((pt - ct) / pt) * 100 : 0;
+        return [
+          cat ? cat.nombre : "—",
+          s.tipo === "tercerizado" ? "Tercerizado" : "Propio",
+          String(s.cantidad),
+          f(cu),
+          f(pu),
+          r(ri),
+        ];
+      });
+
+      autoTable(doc, {
+        startY: y,
+        margin: { left: 10, right: 10 },
+        head: [["Servicio", "Tipo", "Cant.", "Costo unit.", "Precio cliente", "Rent. %"]],
+        body: rows,
+        headStyles: {
+          fillColor: [27, 46, 75] as [number, number, number],
+          textColor: [255, 255, 255] as [number, number, number],
+          fontSize: 8,
+          fontStyle: "bold",
+          halign: "center",
+        },
+        styles: { fontSize: 8, cellPadding: 3 },
+        alternateRowStyles: { fillColor: [244, 247, 251] as [number, number, number] },
+        columnStyles: {
+          0: { overflow: "linebreak" },
+          1: { halign: "center" },
+          2: { halign: "center", cellWidth: 14 },
+          3: { halign: "right", cellWidth: 30 },
+          4: { halign: "right", cellWidth: 32 },
+          5: { halign: "center", cellWidth: 18 },
+        },
+      });
+
+      // Summary bar (4 cells, navy background)
+      const fy = doc.lastAutoTable.finalY;
+      const sw = (pageW - 20) / 4;
+      const sh = 15;
+      doc.setFillColor(27, 46, 75);
+      doc.rect(10, fy, pageW - 20, sh, "F");
+
+      (
+        [
+          ["Total costos", f(fin.totalCostos)],
+          ["Total cliente", f(fin.totalCliente)],
+          ["Margen bruto", f(fin.margen)],
+          ["Rentabilidad", r(fin.rentabilidad)],
+        ] as [string, string][]
+      ).forEach(([label, val], i) => {
+        const cx = 10 + (i + 0.5) * sw;
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(7);
+        doc.setTextColor(168, 196, 224);
+        doc.text(label, cx, fy + 5.5, { align: "center" });
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9);
+        doc.setTextColor(255, 255, 255);
+        doc.text(val, cx, fy + 12, { align: "center" });
+      });
+
+      y = fy + sh + 5;
+
+      // Annotations
+      if (op.anotaciones?.trim()) {
+        if (y > pageH - 40) {
+          doc.addPage();
+          y = 18;
+        }
+        doc.setFontSize(8);
+        const lines = doc.splitTextToSize(op.anotaciones, pageW - 40) as string[];
+        const ah = Math.max(18, lines.length * 4.8 + 11);
+        doc.setFillColor(255, 249, 243);
+        doc.rect(10, y, pageW - 20, ah, "F");
+        doc.setFillColor(244, 124, 32);
+        doc.rect(10, y, 3, ah, "F");
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(27, 46, 75);
+        doc.text("Anotaciones:", 16, y + 6);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(107, 122, 148);
+        doc.text(lines, 16, y + 12);
+        y += ah + 6;
+      }
+
+      y += 5;
+    }
+
+    // ── FOOTER on all pages ──
+    const totalPages = doc.getNumberOfPages();
+    for (let p = 1; p <= totalPages; p++) {
+      doc.setPage(p);
+      doc.setFillColor(27, 46, 75);
+      doc.rect(0, pageH - 12, pageW, 12, "F");
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.setTextColor(255, 255, 255);
+      doc.text(
+        "www.convivepro.co  ·  info@convivepro.co  ·  WhatsApp: 312 234 0998",
+        pageW / 2,
+        pageH - 4.5,
+        { align: "center" }
+      );
+    }
+
+    // Save file
+    const datePart = today.toISOString().slice(0, 10).replace(/-/g, "");
+    const namePart = (cliente.nombre || "Cliente").replace(/\s+/g, "_").replace(/[^\w]/g, "");
+    doc.save(`ConVivePro_${namePart}_${datePart}.pdf`);
   };
 
   const semaforoColor: Record<string, string> = { verde: GREEN, amarillo: ORANGE, rojo: "#E74C3C" };
@@ -574,9 +793,9 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
               </div>
             )}
 
-            {/* Botón cotización */}
+            {/* Botón cotización PDF */}
             <button
-              onClick={() => alert(`Funcionalidad de generación de PDF próximamente.\n\nCliente: ${cliente.nombre || "Sin nombre"}\n${opciones.map(op => { const fin = calcFinanciero(op); return `Opción ${op.id}: ${fmt(fin.totalCliente)}`; }).join(" | ")}`)}
+              onClick={generarPDF}
               style={{ width: "100%", background: ORANGE, color: "white", border: "none", borderRadius: 10, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
               📄 Generar cotización formal ({opciones.length === 1 ? "1 opción" : `${opciones.length} opciones`})
             </button>
