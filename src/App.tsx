@@ -28,6 +28,11 @@ const SERVICIOS_CATALOGO = [
   { id: "refrigerio_basico", nombre: "Refrigerio básico", categoria: "Logística" },
   { id: "refrigerio_medio", nombre: "Refrigerio medio", categoria: "Logística" },
   { id: "refrigerio_premium", nombre: "Refrigerio premium", categoria: "Logística" },
+  { id: "sillas", nombre: "Sillas", categoria: "Logística" },
+  { id: "mesas", nombre: "Mesas", categoria: "Logística" },
+  { id: "carpa_pequena", nombre: "Carpa pequeña", categoria: "Logística" },
+  { id: "carpa_grande", nombre: "Carpa grande", categoria: "Logística" },
+  { id: "otro", nombre: "Otro", categoria: "Logística" },
 ];
 
 const ACTIVOS_INIT: never[] = [];
