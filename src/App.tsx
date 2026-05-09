@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState } from "react";
 
 const NAVY = "#1B2E4B";
 const BLUE = "#3A90D9";
@@ -35,19 +35,17 @@ const SERVICIOS_CATALOGO = [
   { id: "otro", nombre: "Otro", categoria: "Logística" },
 ];
 
-const ACTIVOS_INIT: never[] = [];
-
-const fmt = (n: number | string) => n ? new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(Number(n)) : "—";
+const fmt = (n: number | string) =>
+  n ? new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(Number(n)) : "—";
 const pct = (n: number) => isNaN(n) || !isFinite(n) ? "—" : n.toFixed(1) + "%";
 
-function calcDepreciacion(valorAdq: string, valorResidual: string, vidaUtil: string, _fechaCompra?: string) {
+function calcDepreciacion(valorAdq: string, valorResidual: string, vidaUtil: string) {
   if (!valorAdq || !vidaUtil) return null;
   const va = parseFloat(valorAdq) || 0;
   const vr = parseFloat(valorResidual) || 0;
   const vu = parseFloat(vidaUtil) || 1;
   const depAnual = (va - vr) / vu;
-  const depMensual = depAnual / 12;
-  return { depAnual, depMensual };
+  return { depAnual, depMensual: depAnual / 12 };
 }
 
 let nextId = 1;
@@ -60,13 +58,15 @@ function newServicio() {
     costoEquipo: "",
     precioCliente: "",
     activoId: null as number | null,
+    cantidad: 1,
   };
 }
 
 type Servicio = ReturnType<typeof newServicio>;
 type Activo = { id: number; nombre: string; valorAdq: string; valorResidual: string; vidaUtil: string; fechaCompra: string };
 type Cliente = { nombre: string; contacto: string; telefono: string; correo: string; direccion: string; ciudad: string };
-type HistorialEntry = { fecha: string; cliente: string; totalCliente: number; rentabilidad: string; semaforo: string };
+type Opcion = { id: string; servicios: Servicio[]; anotaciones: string };
+type HistorialEntry = { fecha: string; cliente: string; totalCliente: number; rentabilidad: string; semaforo: string; numOpciones: number };
 type AnalisisIA = {
   error?: boolean;
   resumen?: string;
@@ -75,40 +75,31 @@ type AnalisisIA = {
   estrategia_rentabilidad?: string[];
   precio_recomendado?: number;
   semaforo?: string;
+  comparacion_opciones?: string;
 };
+
+const LETRAS = ["A", "B", "C"];
+
+function nuevaOpcion(id: string): Opcion {
+  return { id, servicios: [newServicio()], anotaciones: "" };
+}
 
 export default function App() {
   const [tab, setTab] = useState("cotizador");
-  const [servicios, setServicios] = useState<Servicio[]>([newServicio()]);
-  const [activos, setActivos] = useState<Activo[]>(ACTIVOS_INIT);
+  const [opciones, setOpciones] = useState<Opcion[]>([nuevaOpcion("A")]);
+  const [opcionActiva, setOpcionActiva] = useState("A");
+  const [activos, setActivos] = useState<Activo[]>([]);
   const [cliente, setCliente] = useState<Cliente>({ nombre: "", contacto: "", telefono: "", correo: "", direccion: "", ciudad: "" });
   const [analisisIA, setAnalisisIA] = useState<AnalisisIA | null>(null);
   const [loadingIA, setLoadingIA] = useState(false);
   const [historial, setHistorial] = useState<HistorialEntry[]>([]);
   const [nuevoActivo, setNuevoActivo] = useState({ nombre: "", valorAdq: "", valorResidual: "", vidaUtil: "", fechaCompra: "" });
 
-  const updateServicio = (idx: number, field: string, val: string | number | null) => {
-    setServicios(prev => {
-      const next = [...prev];
-      next[idx] = { ...next[idx], [field]: val };
-      if (field === "tipo") {
-        next[idx].costoProveedor = "";
-        next[idx].costoEquipo = "";
-        next[idx].activoId = null;
-      }
-      return next;
-    });
-    setAnalisisIA(null);
-  };
-
-  const addServicio = () => setServicios(prev => [...prev, newServicio()]);
-  const removeServicio = (idx: number) => setServicios(prev => prev.filter((_, i) => i !== idx));
-
   const getDepreciacion = (s: Servicio) => {
     if (s.tipo !== "propio" || !s.activoId) return null;
     const activo = activos.find(a => a.id === s.activoId);
     if (!activo) return null;
-    return calcDepreciacion(activo.valorAdq, activo.valorResidual, activo.vidaUtil, activo.fechaCompra);
+    return calcDepreciacion(activo.valorAdq, activo.valorResidual, activo.vidaUtil);
   };
 
   const getCosto = (s: Servicio) => {
@@ -118,40 +109,107 @@ export default function App() {
     return parseFloat(s.costoEquipo) || 0;
   };
 
-  const totalCostos = servicios.reduce((acc, s) => acc + getCosto(s), 0);
-  const totalCliente = servicios.reduce((acc, s) => acc + (parseFloat(s.precioCliente) || 0), 0);
-  const margen = totalCliente - totalCostos;
-  const rentabilidad = totalCliente > 0 ? (margen / totalCliente) * 100 : 0;
+  const calcFinanciero = (op: Opcion) => {
+    const totalCostos = op.servicios.reduce((acc, s) => acc + getCosto(s) * s.cantidad, 0);
+    const totalCliente = op.servicios.reduce((acc, s) => acc + (parseFloat(s.precioCliente) || 0) * s.cantidad, 0);
+    const margen = totalCliente - totalCostos;
+    const rentabilidad = totalCliente > 0 ? (margen / totalCliente) * 100 : 0;
+    return { totalCostos, totalCliente, margen, rentabilidad };
+  };
 
-  const llamarIA = useCallback(async () => {
+  const updateServicio = (opcionId: string, idx: number, field: string, val: string | number | null) => {
+    setOpciones(prev => prev.map(op => {
+      if (op.id !== opcionId) return op;
+      const next = [...op.servicios];
+      next[idx] = { ...next[idx], [field]: val };
+      if (field === "tipo") {
+        next[idx].costoProveedor = "";
+        next[idx].costoEquipo = "";
+        next[idx].activoId = null;
+      }
+      return { ...op, servicios: next };
+    }));
+    setAnalisisIA(null);
+  };
+
+  const addServicio = (opcionId: string) =>
+    setOpciones(prev => prev.map(op =>
+      op.id === opcionId ? { ...op, servicios: [...op.servicios, newServicio()] } : op
+    ));
+
+  const removeServicio = (opcionId: string, idx: number) =>
+    setOpciones(prev => prev.map(op =>
+      op.id === opcionId ? { ...op, servicios: op.servicios.filter((_, i) => i !== idx) } : op
+    ));
+
+  const updateAnotaciones = (opcionId: string, text: string) =>
+    setOpciones(prev => prev.map(op =>
+      op.id === opcionId ? { ...op, anotaciones: text } : op
+    ));
+
+  const addOpcion = () => {
+    if (opciones.length >= 3) return;
+    const letra = LETRAS.find(l => !opciones.some(o => o.id === l))!;
+    setOpciones(prev => [...prev, nuevaOpcion(letra)]);
+    setOpcionActiva(letra);
+    setAnalisisIA(null);
+  };
+
+  const removeOpcion = (id: string) => {
+    if (opciones.length <= 1) return;
+    const remaining = opciones.filter(o => o.id !== id);
+    if (opcionActiva === id) setOpcionActiva(remaining[0].id);
+    setOpciones(remaining);
+    setAnalisisIA(null);
+  };
+
+  const opcion = opciones.find(o => o.id === opcionActiva) ?? opciones[0];
+  const { totalCostos, totalCliente, margen, rentabilidad } = calcFinanciero(opcion);
+
+  const llamarIA = async () => {
     setLoadingIA(true);
     setAnalisisIA(null);
-    const items = servicios.map(s => {
-      const cat = SERVICIOS_CATALOGO.find(c => c.id === s.servicioId);
+
+    const opcionesData = opciones.map(op => {
+      const fin = calcFinanciero(op);
+      const items = op.servicios.map(s => {
+        const cat = SERVICIOS_CATALOGO.find(c => c.id === s.servicioId);
+        return {
+          servicio: cat ? cat.nombre : "Sin seleccionar",
+          tipo: s.tipo,
+          cantidad: s.cantidad,
+          costoTotal: getCosto(s) * s.cantidad,
+          precioClienteTotal: (parseFloat(s.precioCliente) || 0) * s.cantidad,
+        };
+      });
       return {
-        servicio: cat ? cat.nombre : "Sin seleccionar",
-        tipo: s.tipo,
-        costo: getCosto(s),
-        precioCliente: parseFloat(s.precioCliente) || 0,
+        opcion: `Opción ${op.id}`,
+        items,
+        totalCostos: fin.totalCostos,
+        totalCliente: fin.totalCliente,
+        margen: fin.margen,
+        rentabilidad: fin.rentabilidad.toFixed(1) + "%",
+        anotaciones: op.anotaciones,
       };
     });
+
+    const totalGlobal = opcionesData.reduce((acc, o) => acc + o.totalCliente, 0);
+
     const prompt = `Eres el asesor estratégico de ConVive Pro, empresa colombiana especializada en producción integral de asambleas de propiedad horizontal en Pereira y Dosquebradas.
 
-Analiza esta cotización y entrega un JSON con exactamente esta estructura (sin markdown, sin texto extra):
+Analiza ${opciones.length > 1 ? "estas " + opciones.length + " opciones de cotización" : "esta cotización"} y entrega un JSON con exactamente esta estructura (sin markdown, sin texto extra):
 {
   "optimizacion_costos": ["idea 1", "idea 2", "idea 3"],
-  "precio_mercado": "párrafo corto comparando el precio total ${fmt(totalCliente)} con el mercado colombiano de producción de asambleas PH",
+  "precio_mercado": "párrafo corto sobre posicionamiento en el mercado colombiano de asambleas PH (precio total global: ${fmt(totalGlobal)})",
   "estrategia_rentabilidad": ["táctica 1", "táctica 2", "táctica 3"],
   "precio_recomendado": number,
   "semaforo": "verde|amarillo|rojo",
-  "resumen": "una frase de diagnóstico ejecutivo"
+  "resumen": "una frase de diagnóstico ejecutivo"${opciones.length > 1 ? `,
+  "comparacion_opciones": "análisis comparativo indicando cuál opción es más conveniente y por qué"` : ""}
 }
 
-Items cotizados: ${JSON.stringify(items)}
-Total costos: ${totalCostos}
-Total cliente: ${totalCliente}
-Margen: ${margen}
-Rentabilidad: ${rentabilidad.toFixed(1)}%
+Opciones: ${JSON.stringify(opcionesData)}
+Total global: ${totalGlobal}
 
 Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios agresivos vs competencia, máxima rentabilidad.`;
 
@@ -161,7 +219,7 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
+          max_tokens: 1200,
           messages: [{ role: "user", content: prompt }],
         }),
       });
@@ -171,19 +229,25 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
       const parsed = JSON.parse(clean);
       setAnalisisIA(parsed);
 
+      const mejorRent = opciones.reduce((best, op) => {
+        const r = calcFinanciero(op).rentabilidad;
+        return r > best ? r : best;
+      }, 0);
+
       const entrada: HistorialEntry = {
         fecha: new Date().toLocaleDateString("es-CO"),
         cliente: cliente.nombre || "Sin nombre",
-        totalCliente,
-        rentabilidad: rentabilidad.toFixed(1),
+        totalCliente: totalGlobal,
+        rentabilidad: mejorRent.toFixed(1),
         semaforo: parsed.semaforo,
+        numOpciones: opciones.length,
       };
       setHistorial(prev => [entrada, ...prev.slice(0, 9)]);
     } catch (_e) {
       setAnalisisIA({ error: true, resumen: "No se pudo obtener el análisis. Verifica tu conexión." });
     }
     setLoadingIA(false);
-  }, [servicios, totalCostos, totalCliente, margen, rentabilidad, cliente]);
+  };
 
   const agregarActivo = () => {
     if (!nuevoActivo.nombre || !nuevoActivo.valorAdq || !nuevoActivo.vidaUtil) return;
@@ -212,7 +276,6 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
             <div style={{ color: "#A8C4E0", fontSize: 11 }}>Producción de Asambleas · Colombia</div>
           </div>
         </div>
-        {/* Tabs */}
         <div style={{ display: "flex", gap: 4, paddingBottom: 0, position: "relative", zIndex: 1 }}>
           {[["cotizador", "Cotizador"], ["activos", "Activos / Equipos"], ["historial", "Historial"]].map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)} style={{ background: tab === key ? "white" : "transparent", color: tab === key ? NAVY : "#A8C4E0", border: "none", borderRadius: "6px 6px 0 0", padding: "8px 16px", fontWeight: tab === key ? 600 : 400, fontSize: 13, cursor: "pointer" }}>
@@ -243,31 +306,81 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
               </div>
             </div>
 
+            {/* Pestañas de opciones */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+              {opciones.map(op => (
+                <div key={op.id} style={{ display: "flex" }}>
+                  <button
+                    onClick={() => setOpcionActiva(op.id)}
+                    style={{
+                      background: opcionActiva === op.id ? NAVY : "white",
+                      color: opcionActiva === op.id ? "white" : NAVY,
+                      border: `1px solid ${opcionActiva === op.id ? NAVY : BORDER}`,
+                      borderRadius: opciones.length > 1 ? "6px 0 0 6px" : 6,
+                      padding: "7px 16px",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Opción {op.id}
+                  </button>
+                  {opciones.length > 1 && (
+                    <button
+                      onClick={() => removeOpcion(op.id)}
+                      style={{
+                        background: opcionActiva === op.id ? "#243E62" : LIGHT,
+                        color: opcionActiva === op.id ? "#A8C4E0" : "#E74C3C",
+                        border: `1px solid ${opcionActiva === op.id ? NAVY : BORDER}`,
+                        borderLeft: "none",
+                        borderRadius: "0 6px 6px 0",
+                        padding: "7px 9px",
+                        fontSize: 12,
+                        cursor: "pointer",
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              ))}
+              {opciones.length < 3 && (
+                <button
+                  onClick={addOpcion}
+                  style={{ background: "white", color: BLUE, border: `1px dashed ${BLUE}`, borderRadius: 6, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                >
+                  + Agregar opción
+                </button>
+              )}
+            </div>
+
             {/* Tabla servicios */}
             <div style={{ background: "white", borderRadius: 10, border: `1px solid ${BORDER}`, padding: 18, marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                 <div style={{ color: NAVY, fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ background: ORANGE, color: "white", borderRadius: 4, padding: "1px 7px", fontSize: 11 }}>SERVICIOS</span>
+                  <span style={{ color: MUTED, fontSize: 11 }}>— Opción {opcion.id}</span>
                 </div>
-                <button onClick={addServicio} style={{ background: BLUE, color: "white", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>+ Agregar</button>
+                <button onClick={() => addServicio(opcion.id)} style={{ background: BLUE, color: "white", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>+ Agregar</button>
               </div>
 
-              {/* Cabecera */}
-              <div style={{ display: "grid", gridTemplateColumns: "2fr 110px 1fr 1fr 80px", gap: 8, fontSize: 10, color: MUTED, fontWeight: 600, padding: "0 4px 6px", borderBottom: `1px solid ${BORDER}`, marginBottom: 8 }}>
-                <span>SERVICIO</span><span>TIPO</span><span>COSTO</span><span>PRECIO CLIENTE</span><span></span>
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 65px 105px 1fr 1fr 76px", gap: 8, fontSize: 10, color: MUTED, fontWeight: 600, padding: "0 4px 6px", borderBottom: `1px solid ${BORDER}`, marginBottom: 8 }}>
+                <span>SERVICIO</span><span>CANT.</span><span>TIPO</span><span>COSTO</span><span>PRECIO CLIENTE</span><span></span>
               </div>
 
-              {servicios.map((s, idx) => {
+              {opcion.servicios.map((s, idx) => {
                 const dep = getDepreciacion(s);
-                const costoCalc = getCosto(s);
-                const precio = parseFloat(s.precioCliente) || 0;
+                const costoUnit = getCosto(s);
+                const costoCalc = costoUnit * s.cantidad;
+                const precioUnit = parseFloat(s.precioCliente) || 0;
+                const precio = precioUnit * s.cantidad;
                 const margenItem = precio - costoCalc;
                 const rentItem = precio > 0 ? (margenItem / precio) * 100 : 0;
                 return (
                   <div key={s._id} style={{ marginBottom: 8, padding: "10px 4px", borderBottom: `1px solid ${LIGHT}` }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "2fr 110px 1fr 1fr 80px", gap: 8, alignItems: "start" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "2fr 65px 105px 1fr 1fr 76px", gap: 8, alignItems: "start" }}>
                       {/* Servicio */}
-                      <select value={s.servicioId} onChange={e => updateServicio(idx, "servicioId", e.target.value)}
+                      <select value={s.servicioId} onChange={e => updateServicio(opcion.id, idx, "servicioId", e.target.value)}
                         style={{ padding: "7px 8px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 12, width: "100%" }}>
                         <option value="">Seleccionar…</option>
                         {["Tecnología","AV","Registro","Logística"].map(cat => (
@@ -279,8 +392,15 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
                         ))}
                       </select>
 
+                      {/* Cantidad */}
+                      <input
+                        type="number" min="1" value={s.cantidad}
+                        onChange={e => updateServicio(opcion.id, idx, "cantidad", Math.max(1, parseInt(e.target.value) || 1))}
+                        style={{ padding: "7px 6px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 12, width: "100%", boxSizing: "border-box", textAlign: "center" }}
+                      />
+
                       {/* Tipo */}
-                      <select value={s.tipo} onChange={e => updateServicio(idx, "tipo", e.target.value)}
+                      <select value={s.tipo} onChange={e => updateServicio(opcion.id, idx, "tipo", e.target.value)}
                         style={{ padding: "7px 8px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 12, width: "100%" }}>
                         <option value="tercerizado">Tercerizado</option>
                         <option value="propio">Propio</option>
@@ -290,20 +410,20 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
                       <div>
                         {s.tipo === "tercerizado" ? (
                           <input type="number" placeholder="$ Proveedor" value={s.costoProveedor}
-                            onChange={e => updateServicio(idx, "costoProveedor", e.target.value)}
+                            onChange={e => updateServicio(opcion.id, idx, "costoProveedor", e.target.value)}
                             style={{ padding: "7px 8px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 12, width: "100%", boxSizing: "border-box" }} />
                         ) : (
                           <div>
-                            <select value={s.activoId ?? ""} onChange={e => updateServicio(idx, "activoId", e.target.value ? parseInt(e.target.value) : null)}
+                            <select value={s.activoId ?? ""} onChange={e => updateServicio(opcion.id, idx, "activoId", e.target.value ? parseInt(e.target.value) : null)}
                               style={{ padding: "6px 8px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 11, width: "100%", marginBottom: 4 }}>
                               <option value="">Activo (dep.)…</option>
                               {activos.map(a => <option key={a.id} value={a.id}>{a.nombre}</option>)}
                             </select>
                             {dep ? (
-                              <div style={{ fontSize: 10, color: GREEN, fontWeight: 600 }}>Dep. mensual: {fmt(dep.depMensual)}</div>
+                              <div style={{ fontSize: 10, color: GREEN, fontWeight: 600 }}>Dep./mes: {fmt(dep.depMensual)}</div>
                             ) : (
                               <input type="number" placeholder="$ Equipo" value={s.costoEquipo}
-                                onChange={e => updateServicio(idx, "costoEquipo", e.target.value)}
+                                onChange={e => updateServicio(opcion.id, idx, "costoEquipo", e.target.value)}
                                 style={{ padding: "6px 8px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 11, width: "100%", boxSizing: "border-box" }} />
                             )}
                           </div>
@@ -312,12 +432,12 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
 
                       {/* Precio cliente */}
                       <input type="number" placeholder="$ Cliente" value={s.precioCliente}
-                        onChange={e => updateServicio(idx, "precioCliente", e.target.value)}
+                        onChange={e => updateServicio(opcion.id, idx, "precioCliente", e.target.value)}
                         style={{ padding: "7px 8px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 12, width: "100%", boxSizing: "border-box" }} />
 
                       {/* Acciones */}
                       <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
-                        <button onClick={() => removeServicio(idx)}
+                        <button onClick={() => removeServicio(opcion.id, idx)}
                           style={{ background: "none", border: "none", color: "#E74C3C", cursor: "pointer", fontSize: 16, padding: "2px 6px" }}>✕</button>
                         {precio > 0 && costoCalc > 0 && (
                           <div style={{ fontSize: 10, color: rentItem >= 30 ? GREEN : rentItem >= 15 ? ORANGE : "#E74C3C", fontWeight: 600, textAlign: "right" }}>
@@ -331,7 +451,22 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
               })}
             </div>
 
-            {/* Resumen financiero */}
+            {/* Anotaciones */}
+            <div style={{ background: "white", borderRadius: 10, border: `1px solid ${BORDER}`, padding: 18, marginBottom: 16 }}>
+              <div style={{ color: NAVY, fontWeight: 600, fontSize: 13, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ background: NAVY, color: "white", borderRadius: 4, padding: "1px 7px", fontSize: 11 }}>ANOTACIONES</span>
+                <span style={{ color: MUTED, fontSize: 11 }}>— Opción {opcion.id}</span>
+              </div>
+              <textarea
+                placeholder="Anotaciones para el cliente: condiciones, aclaraciones, observaciones especiales…"
+                value={opcion.anotaciones}
+                onChange={e => updateAnotaciones(opcion.id, e.target.value)}
+                rows={3}
+                style={{ width: "100%", padding: "10px", borderRadius: 6, border: `1px solid ${BORDER}`, fontSize: 13, resize: "vertical", fontFamily: "system-ui, sans-serif", color: NAVY, boxSizing: "border-box", outline: "none" }}
+              />
+            </div>
+
+            {/* Resumen financiero opción activa */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
               {[
                 ["Total costos", fmt(totalCostos), BORDER],
@@ -346,10 +481,31 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
               ))}
             </div>
 
+            {/* Comparativo opciones (solo si hay más de una) */}
+            {opciones.length > 1 && (
+              <div style={{ background: "white", borderRadius: 10, border: `1px solid ${BORDER}`, padding: 14, marginBottom: 16 }}>
+                <div style={{ color: NAVY, fontWeight: 600, fontSize: 12, marginBottom: 10 }}>Comparativo de opciones</div>
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${opciones.length}, 1fr)`, gap: 10 }}>
+                  {opciones.map(op => {
+                    const fin = calcFinanciero(op);
+                    const esActiva = opcionActiva === op.id;
+                    return (
+                      <div key={op.id} onClick={() => setOpcionActiva(op.id)}
+                        style={{ background: esActiva ? NAVY : LIGHT, borderRadius: 8, padding: "10px 12px", cursor: "pointer", border: `1px solid ${esActiva ? NAVY : BORDER}` }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color: esActiva ? "white" : NAVY, marginBottom: 4 }}>Opción {op.id}</div>
+                        <div style={{ fontSize: 12, color: esActiva ? "#A8C4E0" : MUTED }}>Total: {fmt(fin.totalCliente)}</div>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: fin.rentabilidad >= 30 ? GREEN : fin.rentabilidad >= 15 ? ORANGE : "#E74C3C" }}>{pct(fin.rentabilidad)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Botón IA */}
-            <button onClick={llamarIA} disabled={loadingIA || servicios.length === 0}
+            <button onClick={llamarIA} disabled={loadingIA}
               style={{ width: "100%", background: loadingIA ? MUTED : NAVY, color: "white", border: "none", borderRadius: 10, padding: "14px", fontSize: 15, fontWeight: 700, cursor: loadingIA ? "not-allowed" : "pointer", marginBottom: 16, transition: "background 0.2s" }}>
-              {loadingIA ? "⏳ Analizando con IA…" : "✦ Analizar con IA — Optimizar costos y rentabilidad"}
+              {loadingIA ? "⏳ Analizando con IA…" : `✦ Analizar con IA — ${opciones.length > 1 ? `Comparar ${opciones.length} opciones` : "Optimizar costos y rentabilidad"}`}
             </button>
 
             {/* Panel IA */}
@@ -359,6 +515,13 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
                   <div style={{ width: 14, height: 14, borderRadius: "50%", background: semaforoColor[analisisIA.semaforo ?? ""] || MUTED }} />
                   <div style={{ fontWeight: 700, color: NAVY, fontSize: 15 }}>{analisisIA.resumen}</div>
                 </div>
+
+                {analisisIA.comparacion_opciones && (
+                  <div style={{ background: "#EBF5FF", border: `1px solid ${BLUE}`, borderRadius: 8, padding: 14, marginBottom: 14 }}>
+                    <div style={{ fontWeight: 700, color: NAVY, fontSize: 12, marginBottom: 6 }}>⚖️ Comparación de opciones</div>
+                    <div style={{ fontSize: 12, color: "#1a3a5c" }}>{analisisIA.comparacion_opciones}</div>
+                  </div>
+                )}
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
                   <div style={{ background: LIGHT, borderRadius: 8, padding: 14 }}>
@@ -384,15 +547,19 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
                   <div style={{ fontSize: 12, color: "#4A5568" }}>{analisisIA.precio_mercado}</div>
                 </div>
 
-                {analisisIA.precio_recomendado && (
+                {analisisIA.precio_recomendado && opciones.length === 1 && (
                   <div style={{ display: "flex", alignItems: "center", gap: 12, background: NAVY, borderRadius: 8, padding: "12px 16px" }}>
                     <div style={{ color: "#A8C4E0", fontSize: 12 }}>Precio recomendado por IA</div>
                     <div style={{ color: "white", fontWeight: 700, fontSize: 20 }}>{fmt(analisisIA.precio_recomendado)}</div>
                     <button onClick={() => {
                       const ratio = (analisisIA.precio_recomendado ?? 1) / (totalCliente || 1);
-                      setServicios(prev => prev.map(s => ({
-                        ...s, precioCliente: s.precioCliente ? String(Math.round(parseFloat(s.precioCliente) * ratio)) : s.precioCliente
-                      })));
+                      setOpciones(prev => prev.map(op =>
+                        op.id === opcionActiva ? {
+                          ...op, servicios: op.servicios.map(s => ({
+                            ...s, precioCliente: s.precioCliente ? String(Math.round(parseFloat(s.precioCliente) * ratio)) : s.precioCliente
+                          }))
+                        } : op
+                      ));
                     }} style={{ marginLeft: "auto", background: ORANGE, color: "white", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
                       Aplicar
                     </button>
@@ -408,9 +575,10 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
             )}
 
             {/* Botón cotización */}
-            <button onClick={() => alert("Funcionalidad de generación de PDF disponible próximamente. Los datos del cliente y servicios están listos para exportar.")}
+            <button
+              onClick={() => alert(`Funcionalidad de generación de PDF próximamente.\n\nCliente: ${cliente.nombre || "Sin nombre"}\n${opciones.map(op => { const fin = calcFinanciero(op); return `Opción ${op.id}: ${fmt(fin.totalCliente)}`; }).join(" | ")}`)}
               style={{ width: "100%", background: ORANGE, color: "white", border: "none", borderRadius: 10, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-              📄 Generar cotización formal
+              📄 Generar cotización formal ({opciones.length === 1 ? "1 opción" : `${opciones.length} opciones`})
             </button>
           </>
         )}
@@ -433,7 +601,6 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
                 ))}
               </div>
 
-              {/* Preview depreciación */}
               {nuevoActivo.valorAdq && nuevoActivo.vidaUtil && (() => {
                 const d = calcDepreciacion(nuevoActivo.valorAdq, nuevoActivo.valorResidual, nuevoActivo.vidaUtil);
                 return d ? (
@@ -494,7 +661,10 @@ Contexto: mercado colombiano PH, Eje Cafetero. Misión: costos → 0, precios ag
                 {historial.map((h, i) => (
                   <div key={i} style={{ display: "grid", gridTemplateColumns: "80px 2fr 1fr 1fr 100px", padding: "12px 16px", borderBottom: `1px solid ${LIGHT}`, background: i % 2 === 0 ? "white" : LIGHT, alignItems: "center" }}>
                     <span style={{ fontSize: 12, color: MUTED }}>{h.fecha}</span>
-                    <span style={{ fontWeight: 600, color: NAVY, fontSize: 13 }}>{h.cliente}</span>
+                    <span style={{ fontWeight: 600, color: NAVY, fontSize: 13 }}>
+                      {h.cliente}
+                      {h.numOpciones > 1 && <span style={{ fontWeight: 400, color: MUTED, fontSize: 11 }}> · {h.numOpciones} opciones</span>}
+                    </span>
                     <span style={{ fontSize: 13 }}>{fmt(h.totalCliente)}</span>
                     <span style={{ fontSize: 13, fontWeight: 700, color: parseFloat(h.rentabilidad) >= 30 ? GREEN : parseFloat(h.rentabilidad) >= 15 ? ORANGE : "#E74C3C" }}>{h.rentabilidad}%</span>
                     <span>
